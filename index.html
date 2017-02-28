@@ -1,0 +1,1216 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf8">
+    <title>Detector TEST in WebGL (twgl)</title>
+    <style>
+        body {
+            margin: 0;
+            font-family: monospace;
+        }
+
+        canvas {
+            position: absolute;
+            top: 110px;
+            left: 10px;
+            display: block;
+            width: 1000px;
+            height: 800px;
+        }
+
+        #info-long {
+            position: absolute;
+            top: 10px;
+            left: 1050px;
+            /*width: 5%;*/
+            text-align: left;
+            z-index: 2;
+        }
+
+        #b {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            width: 100%;
+            text-align: left;
+            z-index: 2;
+        }
+    </style>
+    <script src="//rawgit.com/mrdoob/stats.js/master/build/stats.min.js"></script>  <!--FPS Counter-->
+</head>
+<body>
+<div id="b">TEST: check the console output (debug)</div>
+<br />
+<br />
+<label for="selectDataGenerator">Data generator:</label>
+<select id="selectDataGenerator" required">
+    <option value="0">___________at_runtime___________</option>
+</select>
+<input type="checkbox" id="cboxSimulation"><label for="cboxSimulation">Meas.Simulation</label>
+<input id="buttonFillTestData" type="button" value="Fill test data">
+<label for="selectFilterType">Filter type:</label>
+<select id="selectFilterType" required">
+    <option value="MIN">Minimum value</option>
+    <option value="MAX" selected="selected">Maximum value</option>
+    <option value="DEBUG_NONE">Debug: Raw data</option>
+    <option value="DEBUG_A">Debug: "A" mode</option>
+    <option value="DEBUG_B">Debug: "B" mode</option>
+    <option value="DEBUG_C">Debug: "C" mode</option>
+</select>
+<label for="selectZoomDelta">Delta zoom/move</label>
+<select id="selectZoomDelta" required">
+    <option value="1">1 texel</option>
+    <option value="10">10 texel</option>
+    <option value="50">50 texel</option>
+    <option value="100" selected="selected">100 texel</option>
+    <option value="200">200 texel</option>
+    <option value="250">250 texel</option>
+    <option value="500">500 texel</option>
+</select>
+<input id="buttonShowPixel2TexelMap" type="button" value="Show map">
+<br />
+<input id="buttonZoomFull" type="button" value="Zoom full">
+<input id="buttonZoom1x1" type="button" value="Zoom 1x1">
+<input id="buttonZoomIn" type="button" value="Zoom-in">
+<input id="buttonZoomOut" type="button" value="Zoom-out">
+<input id="buttonHorZoomIn" type="button" value="Horizontal Zoom-in">
+<input id="buttonHorZoomOut" type="button" value="Horizontal Zoom-out">
+<input id="buttonVerZoomIn" type="button" value="Vertical Zoom-in">
+<input id="buttonVerZoomOut" type="button" value="Vertical Zoom-out">
+<input id="buttonLeft" type="button" value="Left">
+<input id="buttonRight" type="button" value="Right">
+<input id="buttonUp" type="button" value="Up">
+<input id="buttonDown" type="button" value="Down">
+<br />
+<pre id='info-short'></pre>
+<canvas id="c"></canvas>
+<pre id='info-long'></pre>
+</body>
+<script src="scripts/thirdparty/twgl.js"></script>
+<script>
+    "use strict";
+
+    //TODO: canvas átméretezés lekezelése
+    //TODO: dataTexture gyorsabb inicializálása
+    //TODO: a zoom igazodjon az egér poziciójához (offset igazítása)
+    //TODO: zoom sebesség az egérgörgő sebessége alapján
+    //TODO: színskála textura kezelés
+    //TODO: avg filter (aka detector)
+    //TODO: dataTexture túlcsordulás kezelése - törlés
+    //TODO: webgl kontextus-vesztés lekezelése
+
+    //-----  FPS Counter -----------------------------------------
+    var stats=new Stats();
+    stats.dom.style='position:fixed !important; right:0px !important; top:0px !important; border:none !important; z-index:99999 !important;';
+    for(var child=stats.dom.firstChild;
+        child!==null;
+        child=child.nextSibling) {child.style = 'position:static !important;' + child.getAttribute('style');
+    }
+    document.body.insertBefore(stats.dom, document.body.firstChild);
+
+    //-----------------------------------------------
+    // Size of texture:
+    let dataArrayTexelWidth = 16000;
+    let dataArrayTexelHeight = 16000;
+//    let dataArrayTexelWidth = 1213;
+//    let dataArrayTexelHeight = 929;
+    //-----------------------------------------------
+    const MAX_CANVAS_WIDTH = 4096;
+    const MAX_DATA_ARRAY_TEXEL_WIDTH    = 20000;    // az elméletileg támogatott legnagyobb adatmennyiség
+    const MAX_DATA_ARRAY_TEXEL_HEIGHT   = 20000;    // az elméletileg támogatott legnagyobb adatmennyiség
+    const TEXTURE_UNIT_SEQ_PIXEL_MAP    = 1;
+    const TEXTURE_UNIT_SEQ_DATA         = 2;
+    const TEXTURE_UNIT_SEQ_COLOR        = 3;
+    const TEXTURE_UNIT_SEQ_CACHE_FB_1   = 4;
+    const TEXTURE_UNIT_SEQ_CACHE_FB_2   = 5;
+    const FILTER_TYPE_MIN               = 1;        // "Minimum value" detektor
+    const FILTER_TYPE_MAX               = 2;        // "Maximum value" detektor
+    const FILTER_TYPE_AVG               = 3;        // "Average value" detektor
+    const FILTER_TYPE_DEBUG_NONE        = 0;        // DEBUG-only: nincs detektor, frame buffer tartalma nyersen jelenjen meg
+    const FILTER_TYPE_DEBUG_A           = -1;       // DEBUG-only: (Attól függ, hogy éppen milyen hibakereső/nyomzó algoritmus van a shader-ben leprogramozva.)
+    const FILTER_TYPE_DEBUG_B           = -2;       // DEBUG-only: (Attól függ, hogy éppen milyen hibakereső/nyomzó algoritmus van a shader-ben leprogramozva.)
+    const FILTER_TYPE_DEBUG_C           = -3;       // DEBUG-only: (Attól függ, hogy éppen milyen hibakereső/nyomzó algoritmus van a shader-ben leprogramozva.)
+    let dataTextureFreeSpacePointer = 0;    // a SORFOLYTONOSAN(!!!) kezelt dataTexture-ben a szabad hely kezdetének pozíciója
+    const nullPixelMapArray = new Uint16Array(MAX_CANVAS_WIDTH *2/*16bit*/ *2/*col+row mapping*/);
+    let zoomStep = 50;
+    //-----------------------------------------------
+
+    let logPreTime = 0;
+    function log(pMessage) {
+        let logNewTime = (new Date()).getTime();
+        if (logPreTime == 0) logPreTime = logNewTime;
+        console.log("[" + logNewTime + ",+" + (logNewTime - logPreTime) + "]\t" + pMessage);
+        logPreTime = logNewTime;
+    }
+
+    let veryVerySimpleEventQueue = [];
+    function newEvent(pEvent) {
+        //log("new event: "+pEvent.type);
+        veryVerySimpleEventQueue.push(pEvent);
+    }
+    document.querySelector('#selectDataGenerator').addEventListener('click', function() {let event ={type: "changeDataGenerator"}; newEvent(event)}, false);
+    document.querySelector('#cboxSimulation').addEventListener('click', function() {let event ={type: "ToggleSimulation"}; newEvent(event)}, false);
+    document.querySelector('#buttonFillTestData').addEventListener('click', function() {let event ={type: "fillTestData"}; newEvent(event)}, false);
+    document.querySelector('#selectFilterType').addEventListener('change', function() {let event ={type: "changeFilterType", value: this.value}; newEvent(event)}, false);
+    document.querySelector('#selectZoomDelta').addEventListener('change', function() {let event ={type: "changeZoomDelta", value: this.value}; newEvent(event)}, false);
+    document.querySelector('#buttonShowPixel2TexelMap').addEventListener('click', function() {let event ={type: "showPixel2TexelMap"}; newEvent(event)}, false);
+
+    document.querySelector('#buttonZoomFull').addEventListener('click', function() {let event ={type: "ZoomFull"}; newEvent(event)}, false);
+    document.querySelector('#buttonZoom1x1').addEventListener('click', function() {let event ={type: "Zoom1x1"}; newEvent(event)}, false);
+    document.querySelector('#buttonZoomIn').addEventListener('click', function() {let event ={type: "Zoom", width: -1 * zoomStep, height: -1 * zoomStep}; newEvent(event)}, false);
+    document.querySelector('#buttonZoomOut').addEventListener('click', function() {let event ={type: "Zoom", width: zoomStep, height: zoomStep}; newEvent(event)}, false);
+    document.querySelector('#buttonHorZoomIn').addEventListener('click', function() {let event ={type: "Zoom", width: -1 * zoomStep, height: 0}; newEvent(event)}, false);
+    document.querySelector('#buttonHorZoomOut').addEventListener('click', function() {let event ={type: "Zoom", width: 1 * zoomStep, height: 0}; newEvent(event)}, false);
+    document.querySelector('#buttonVerZoomIn').addEventListener('click', function() {let event ={type: "Zoom", width: 0, height: -1 * zoomStep}; newEvent(event)}, false);
+    document.querySelector('#buttonVerZoomOut').addEventListener('click', function() {let event ={type: "Zoom", width: 0, height: zoomStep}; newEvent(event)}, false);
+    document.querySelector('#buttonLeft').addEventListener('click', function() {let event ={type: "Move", deltaCol: zoomStep, deltaRow: 0}; newEvent(event)}, false);
+    document.querySelector('#buttonRight').addEventListener('click', function() {let event ={type: "Move", deltaCol: -1 * zoomStep, deltaRow: 0}; newEvent(event)}, false);
+    document.querySelector('#buttonUp').addEventListener('click', function() {let event ={type: "Move", deltaCol: 0, deltaRow: -1 * zoomStep}; newEvent(event)}, false);
+    document.querySelector('#buttonDown').addEventListener('click', function() {let event ={type: "Move", deltaCol: 0, deltaRow: zoomStep}; newEvent(event)}, false);
+
+    //-----------------------------------------------
+
+    class ZoomClass {
+        constructor(
+            pPagePixelWidth,
+            pPagePixelHeight,
+            pPageTexelWidth,
+            pPageTexelHeight
+        ) {
+            this.pagePixelWidth     = pPagePixelWidth;
+            this.pagePixelHeight    = pPagePixelHeight;
+            this.pageTexelWidth     = pPageTexelWidth;
+            this.pageTexelHeight    = pPageTexelHeight;
+
+            // Az alkalmazás szemszögéből
+            //      mi legyen a képernyő bal felső sarkában,
+            //      melyik logikai pixel jelenjen ott meg.
+            //
+            // FIGYELJ!!!
+            //      Dupla csavar a történetben:
+            //          1.) az adatokat fordított időrendben kell megjeleníteni,
+            //              a frissebb adatok fent, a régebbiek lent
+            //          2.) a fragmant shader matematikai koordinátarendszert használ,
+            //              azaz az "ORIGÓ a BAL ALSÓ SAROKBAN" van,
+            //              szemben a canvas esetében hagyományosan használt "ORIGÓ a BAL FELSŐ SAROKBAN"
+            //              koordinátarendszerekkel.
+            //
+            //      Az alkalmazásnak kényelmesebb azt mondani,
+            //      hogy mi van a bal felső sarokban,
+            //      ezért az Y érték kezelésénél figyelni kell az eltolásra!
+            //
+            this.viewportAppPixelOffsetCol  = 0;    // Azonos minkét típusú koordinátarendszerben
+            this.viewportAppPixelOffsetRow  = 0;    // ELTÉRÉS a két korrdinátarendszer között!!!
+
+            this.rowPixel2TexelMap = [];
+            this.colPixel2TexelMap = [];
+
+            this._setPixel2TexelMap();
+        }
+
+        getAppPixelOffsetCol()      { return this.viewportAppPixelOffsetCol; }
+        getAppPixelOffsetRow()      { return this.viewportAppPixelOffsetRow; }
+        getShaderPixelOffsetCol()   { return this.viewportAppPixelOffsetCol; }
+        getShaderPixelOffsetRow()   { return this.viewportAppPixelOffsetRow - (this.pagePixelHeight -1); }   // !!!
+
+        //  Canvas size + data viewport size ----->  logical resolution
+        _setPixel2TexelMap() {
+            this.colPixel2TexelMap = this._getPixel2TexelMap(this.pagePixelWidth, this.pageTexelWidth);
+            this.rowPixel2TexelMap = this._getPixel2TexelMap(this.pagePixelHeight, this.pageTexelHeight);
+        }
+        setPageTexelSize(pViewportTexelWidth, pViewportTexelHeight) {
+            this.pageTexelWidth      = Math.max(10, pViewportTexelWidth);
+            this.pageTexelHeight     = Math.max(10, pViewportTexelHeight);
+            this._setPixel2TexelMap();
+        }
+        changePageTexelSize(pDeltaViewportWidth, pDeltaViewportHeight) {
+            this.setPageTexelSize(
+                this.pageTexelWidth + pDeltaViewportWidth,
+                this.pageTexelHeight + pDeltaViewportHeight
+            );
+        }
+        moveViewportToTexel(pTexelCol, pTexelRow) {
+            this.viewportAppPixelOffsetCol  = this.texel2PixelCol(pTexelCol);
+            this.viewportAppPixelOffsetRow  = this.texel2PixelRow(pTexelRow);
+        }
+        moveViewportRelativeByPixel(pDeltaPixelCol, pDeltaPixelRow) {
+            this.viewportAppPixelOffsetCol += pDeltaPixelCol;
+            this.viewportAppPixelOffsetRow += pDeltaPixelRow;
+        }
+        _texel2Pixel(pTexelPosition, pPageTexelSize, pPagePixelSize, pPixel2TexelMap) {
+            // Adott sor vagy oszlop texel-koordinátájú mérési adatunk
+            // melyik logikai(!) pixelnek felel meg az aktuális zoom-nak megfelelően.
+            // A (0,0) logikai-pixelnek az első söprés első frekijét tekintjük,
+            // függetlenül attól, hogy a canvas-en ténylegesen melyik adatterület jelenik meg.
+            let thisPage = Math.floor(pTexelPosition / pPageTexelSize);
+            let texelOffsetOnThisPage = pTexelPosition - thisPage * pPageTexelSize;
+            let pixelOffsetInThisPage = 0;
+            for (let i = 0; i < pPixel2TexelMap.length/2; i++) {
+                if (texelOffsetOnThisPage >= pPixel2TexelMap[i*2] && texelOffsetOnThisPage <= pPixel2TexelMap[i*2+1]) {
+                    pixelOffsetInThisPage = i;
+                }
+            }
+            return thisPage * pPagePixelSize + pixelOffsetInThisPage;
+        }
+        texel2PixelCol(pTexelCol) {
+            return this._texel2Pixel(pTexelCol, this.pageTexelWidth, this.pagePixelWidth, this.colPixel2TexelMap);
+        }
+        texel2PixelRow(pTexelRow) {
+            return this._texel2Pixel(pTexelRow, this.pageTexelHeight, this.pagePixelHeight, this.rowPixel2TexelMap);
+        }
+
+        _getPixel2TexelMap(pPixelNum, pTexelNum) {
+            //TODO: test case need
+
+            let dataArray = new Uint16Array(pPixelNum * 2);
+            let ratio = pTexelNum / pPixelNum;
+            //log("Pixel2Texel start " + pTexelNum +" data point / "  + pPixelNum +" pixel (" + ratio +")");
+
+            let lastTexel = -1;
+            for (let pixel=0; pixel < pPixelNum; pixel++) {
+                let texel = -1;
+                if (pPixelNum >= pTexelNum) {
+                    texel = Math.ceil( (pixel+1)*ratio ) -1;
+                } else {
+                    texel = Math.round( (pixel+1)*ratio ) -1;
+                }
+                if (lastTexel == texel) {
+                    dataArray[pixel * 2] = lastTexel;
+                } else {
+                    dataArray[pixel * 2] = lastTexel + 1;
+                }
+                dataArray[pixel*2 +1] = texel;
+                //log("Pixel2Texel: pixel " + pixel +" <-- ["  + dataArray[pixel*2] +"..."+ dataArray[pixel*2 +1] +"] texels");
+                lastTexel = texel;
+            }
+
+            return dataArray;
+        }
+    }
+
+    //-----------------------------------------------
+
+    class Vector2 {
+        constructor(pX, pY) {
+            this.x = pX;
+            this.y = pY;
+        }
+
+        getX() { return this.x; }
+        setX(pX) { this.x = pX; }
+
+        getY() { return this.y; }
+        setY(pY) { this.y = pY; }
+
+        setAll(pX, pY) {
+            this.x = pX;
+            this.y = pY;
+        }
+
+        getArray() {
+            return [this.x, this.y];
+        }
+
+        toString() {
+            return "("+ this.x +","+ this.y +")";
+        }
+    }
+
+    class Rectangle {
+        constructor(pVectorA, pVectorB) {
+            this.a = pVectorA;
+            this.b = pVectorB;
+        }
+
+        getA() { return this.a; }
+        setA(pVector) { this.a = pVector; }
+
+        getB() { return this.b; }
+        setB(pVector) { this.b = pVector; }
+
+        setAll(pFromX, pFromY, pToX, pToY) {
+            this.a.setAll(pFromX, pFromY);
+            this.b.setAll(pToX, pToY);
+        }
+
+        extendToBoundingBox(
+            pExtenderRectangle
+        ) {
+            if (this.a.x === null) this.a.x = pExtenderRectangle.a.x;
+            if (this.a.y === null) this.a.y = pExtenderRectangle.a.y;
+            if (this.b.x === null) this.b.x = pExtenderRectangle.b.x;
+            if (this.b.y === null) this.b.y = pExtenderRectangle.b.y;
+
+            this.a.x = Math.min(this.a.x, pExtenderRectangle.a.x);
+            this.a.y = Math.min(this.a.y, pExtenderRectangle.a.y);
+
+            this.b.x = Math.max(this.b.x, pExtenderRectangle.b.x);
+            this.b.y = Math.max(this.b.y, pExtenderRectangle.b.y);
+        }
+
+        toString() {
+            return this.a.toString() +"-"+ this.b.toString();
+        }
+    }
+//let invalidTexelArea = new Rectangle(new Vector2(50,10), new Vector2(dataArrayTexelWidth,20));
+//log("invalidTexelArea="+invalidTexelArea.getA().getArray()+" .. "+invalidTexelArea.getB().getArray());
+//let extenderArea = new Rectangle(new Vector2(0,15), new Vector2(123456,2220));
+//invalidTexelArea.extendToBoundingBox(extenderArea);
+//log("invalidTexelArea="+invalidTexelArea.getA().getArray()+" .. "+invalidTexelArea.getB().getArray());
+
+    //-----------------------------------------------
+    class DataTextureClass {
+        constructor(
+            pWebGlContext
+        ) {
+            this.context = pWebGlContext;
+
+            // A maximális helyet foglaljuk le a mérési adatoknak:
+            this.dataTextureWidth = Math.min(16000, this.context.getParameter(this.context.MAX_TEXTURE_SIZE));
+            this.dataTextureHight = this.dataTextureWidth;
+
+            let dataArray = new Int16Array(this.dataTextureWidth * this.dataTextureHight);
+            //dataArray.fill(12000);
+            //TODO: feltölteni egy paraméterként megkapott "NULL" értékkel, azaz egy számmal, ami majd a NULL-t reprezentálja.
+            log("JS array");
+
+            let textureData =
+                {
+                    target: this.context.TEXTURE_2D,
+                    internalFormat: this.context.R16I,
+                    format: this.context.RED_INTEGER,
+                    type: this.context.SHORT,
+                    width: this.dataTextureWidth,
+                    hight: this.dataTextureHight,
+                    src: dataArray
+                };
+
+            this.texture = twgl.createTexture(this.context, textureData);
+            log("twgl.createTexture: " + this.dataTextureWidth + "x" + this.dataTextureHight + "=" + (this.dataTextureWidth * this.dataTextureWidth));
+        }
+
+        _getPhysicalPosition(pLogicalCol, pLogicalRow, pOffset = 0) {
+            //TODO: test case need
+
+            let logicalPos = pLogicalRow * dataArrayTexelWidth + pLogicalCol;
+            if (pOffset != 0 ) logicalPos += pOffset;
+
+            let physicalRow = Math.floor(logicalPos / this.dataTextureWidth);
+            let physicalCol = logicalPos % this.dataTextureWidth;
+            return {x: physicalCol, y: physicalRow};
+        }
+
+        writeData(pStartLogicalCol, pStartLogicalRow, pDataVector1D) {
+            //TODO: test case need
+
+            // Új (mérési) adatok beírása a dataTexture-be
+            //      FIGYELJ!!!
+            //      A maximális helykihasználás érdekében sorfolytonosan kezeljük,
+            //      azaz függetlenül az adataink logikai (dataArrayTexelWidth, dataArrayTexelHeight) felbontásától,
+            //      kihasználjuk a "dataArrayTexelWidth" utána jövő oszlopokat is.
+            //        "Logikai" felbontás   "Fizikai" tárolás
+            //              aaaaa           xxxxxbbbbbccccc
+            //              bbbbb           ddddd..........
+            //              ccccc           ...............
+            //              ddddd           ...............
+            //              .....           ...............
+            let vecStart    = this._getPhysicalPosition(pStartLogicalCol, pStartLogicalRow);
+            let vecEnd      = this._getPhysicalPosition(pStartLogicalCol, pStartLogicalRow, pDataVector1D.length -1 );
+            function _DEBUG(pMessage) {
+                // REMOVE BEFORE FLIGHT
+//                    log("writeData: ("+pStartLogicalCol+","+pStartLogicalRow+") length="+pDataVector1D.length
+//                        +" --> ("+vecStart.x+","+vecStart.y+") - ("+vecEnd.x+","+vecEnd.y+") ## "+ pMessage);
+            }
+            this.context.activeTexture(this.context.TEXTURE0 + TEXTURE_UNIT_SEQ_DATA);
+            //bindTexture() kihagyható, mert fix, nem változó kiosztást használunk, lásd a TEXTURE_INUT_SEQ_??? konstansokat
+            if (vecStart.y == vecEnd.y) {
+                // Az egyszerű (gyors) eset:
+                //      lehet ugyan, hogy több logikai sorba is átnyúlik a kapott tömb,
+                //      de fizikailag egyetlen textura-sorban vannak a helyük,
+                //      így egy írással elintézhető.
+                this.context.texSubImage2D(this.context.TEXTURE_2D, 0, vecStart.x, vecStart.y, pDataVector1D.length, 1, this.context.RED_INTEGER, this.context.SHORT, pDataVector1D);
+                _DEBUG("Simple case");
+            } else {
+                // A bonyolultabb eset:
+                //      a kapott (akárhány logikai sorból álló) adattömb
+                //      több fizikai textura sorba is átnyúlik.
+                //      pl.     .....qqq (1)    .....qqq (1)    wwwwwwww (2)    wwwwwwww (2)    .....qqq (1)
+                //              wwwwwwww (2)    wwwwwwww (2)    wwwwwwww (2)    wwwwwwww (2)    zz...... (3)
+                //              wwwwwwww (2)    wwwwwwww (2)    zz...... (3)
+                //              zz...... (3)
+                //      Három menetbe írjuk ki:
+                //          1.) az első csonka sort, ha van (és nem csak tömbös és esetleg egy csonka befejező sorból áll az egész)
+                //          2.) a középső 2D tömbös részt egyben, ha van (és nem csak két csonka sorból áll az egész)
+                //          3.) az utolsó csonka sort, ha van (és nem csak tömbös és esetleg egy csonka kezdő sorból áll az egész)
+                let writtenLengthCase1 = 0;
+                let writtenLengthCase2 = 0;
+                let writtenLengthCase3 = 0;
+                if (vecStart.x > 0) {   // 1.)  // ha az első sorunk csonka sor (mert nem az első oszloppal kezdődik)
+                    let X = vecStart.x;
+                    let Y = vecStart.y;
+                    let part = pDataVector1D.slice(0, (this.dataTextureWidth-vecStart.x));
+                    this.context.texSubImage2D(this.context.TEXTURE_2D, 0, X, Y, part.length, 1, this.context.RED_INTEGER, this.context.SHORT, part);
+                    writtenLengthCase1 = part.length;
+                    _DEBUG("case 1. length="+part.length +" X="+X +" Y="+Y);
+                }
+                if (                     // 2.)
+                    vecEnd.y > vecStart.y+1             // vagy van legalább egy sor az első és az utolsó között (hiszen akkor az/azok tele sorok)
+                    || vecEnd.x == this.dataTextureWidth -1  // vagy nincs ugyan, mert a következő sor már az utolsó, viszont az végig ér, azaz teli sor
+                ) {
+                    let fromY = (writtenLengthCase1 == 0 ? vecStart.y : vecStart.y +1);
+                    let toY = (vecEnd.x == this.dataTextureWidth-1 ? vecEnd.y : vecEnd.y -1);
+                    let hight = toY - fromY +1;
+                    let part = pDataVector1D.slice(writtenLengthCase1, hight * this.dataTextureWidth);
+                    this.context.texSubImage2D(this.context.TEXTURE_2D, 0, 0, fromY, this.dataTextureWidth, hight, this.context.RED_INTEGER, this.context.SHORT, part);
+                    writtenLengthCase2 = part.length;
+                    _DEBUG("case 2. length="+part.length+" Y="+fromY+"-->"+toY);
+                }
+                if (vecEnd.x < this.dataTextureWidth-1) {   // 3.)   ha az utolsó sorunk egy csonka sor
+                    let X = 0;
+                    let Y = vecEnd.y;
+                    let part = pDataVector1D.slice(writtenLengthCase1 + writtenLengthCase2);
+                    this.context.texSubImage2D(this.context.TEXTURE_2D, 0, X, Y, part.length, 1, this.context.RED_INTEGER, this.context.SHORT, part);
+                    writtenLengthCase3 = part.length;
+                    _DEBUG("case 3. length="+part.length +" X="+X +" Y="+Y);
+                }
+                if (pDataVector1D.length != writtenLengthCase1 + writtenLengthCase2 + writtenLengthCase3) {
+                    // Ajaj!!! Valami rossz a fenti algoritmusban!
+                    //      Ha hiba történt nyomozd ki, ne hagyd így, mert nagy galibát tud okozni...
+                    //      ... megbízhatatlanná tenni a megjelenített adatokat ... és a teljes rendszert!
+                    //      Most komolyan, ez nem tréfa! Vedd komolyan, ha ez a hiba megjelent!!!
+                    throw new Error(
+                        "writeDataTexture error: written length difference "
+                        + pDataVector1D.length +"!="+ (writtenLengthCase1 + writtenLengthCase2 + writtenLengthCase3)
+                        +"  ("+pStartLogicalCol+","+pStartLogicalRow+") length="+pDataVector1D.length
+                        +" --> ("+vecStart.x+","+vecStart.y+") - ("+vecEnd.x+","+vecEnd.y+")"
+                    );
+                }
+            }
+        }
+    }
+
+    class PixelMapTextureClass {
+        constructor(
+            pWebGlContext
+        ) {
+            this.context = pWebGlContext;
+
+            let pixelMapTextureData =
+                {
+                    target: this.context.TEXTURE_2D,
+                    internalFormat: this.context.RG16UI,
+                    format: this.context.RG_INTEGER,
+                    type: this.context.UNSIGNED_SHORT,
+                    width: MAX_CANVAS_WIDTH,
+                    hight: 2,
+                    src: nullPixelMapArray
+                };
+            this.context.activeTexture(this.context.TEXTURE0 + TEXTURE_UNIT_SEQ_PIXEL_MAP);
+            this.texture = twgl.createTexture(this.context, pixelMapTextureData);
+        }
+
+        writePixel2TexelMap(
+            pColPixel2TexelMap,
+            pRowPixel2TexelMap
+        ) {
+            this.context.activeTexture(this.context.TEXTURE0 + TEXTURE_UNIT_SEQ_PIXEL_MAP);
+            //bindTexture() kihagyható, mert fix, nem változó kiosztást használunk, lásd a TEXTURE_INUT_SEQ_??? konstansokat
+            this.context.texSubImage2D(this.context.TEXTURE_2D, 0, 0, 0, MAX_CANVAS_WIDTH, 2, this.context.RG_INTEGER, this.context.UNSIGNED_SHORT, nullPixelMapArray);
+            this.context.texSubImage2D(this.context.TEXTURE_2D, 0, 0, 0, pColPixel2TexelMap.length / 2, 1, this.context.RG_INTEGER, this.context.UNSIGNED_SHORT, pColPixel2TexelMap);
+            this.context.texSubImage2D(this.context.TEXTURE_2D, 0, 0, 1, pRowPixel2TexelMap.length / 2, 1, this.context.RG_INTEGER, this.context.UNSIGNED_SHORT, pRowPixel2TexelMap);
+            //log("set Pixel2TexelMap texture colPixel2TexelMap.length/2=" + pColPixel2TexelMap.length / 2 + " rowPixel2TexelMap.length/2=" + pRowPixel2TexelMap.length / 2);
+        }
+    }
+
+    class ShaderProgramMainClass {
+        constructor(
+            pWebGlContext,
+            pSrcVertex,
+            pSrcFragment,
+            pDataTexture,
+            pPixelMapTexture
+        ) {
+            this.context = pWebGlContext;
+            this.dataTexture = pDataTexture;
+            this.pixelMapTexture = pPixelMapTexture;
+
+            this.programInfo = twgl.createProgramInfo(this.context, [pSrcVertex, pSrcFragment]);
+            log("shaderProgram created.");
+        }
+
+        _setUniforms(
+            pBufferInfo,
+            pZoom,
+            pPairOfCacheFB,     //PairOfCacheFrameBufferClass
+            pCacheDeltaPixelOffsetCol,
+            pCacheDeltaPixelOffsetRow,
+            pInvalidPixelAreaFromCol,
+            pInvalidPixelAreaFromRow,
+            pInvalidPixelAreaToCol,
+            pInvalidPixelAreaToRow
+        ) {
+            this.context.useProgram(this.programInfo.program);
+            twgl.setBuffersAndAttributes(this.context, this.programInfo, pBufferInfo);
+
+            let uniforms = {
+                u_pagePixelSize: [pZoom.pagePixelWidth, pZoom.pagePixelHeight],
+                u_pageTexelSize: [pZoom.pageTexelWidth, pZoom.pageTexelHeight],
+                u_dataArrayTexelWidth: dataArrayTexelWidth,
+                u_viewportPixelOffset: [pZoom.getShaderPixelOffsetCol(), pZoom.getShaderPixelOffsetRow()],
+                u_cacheDeltaPixelOffset: [pCacheDeltaPixelOffsetCol, pCacheDeltaPixelOffsetRow],
+                u_needRecalcFromLogicalPixel: [pInvalidPixelAreaFromCol, pInvalidPixelAreaFromRow],
+                u_needRecalcToLogicalPixel: [pInvalidPixelAreaToCol, pInvalidPixelAreaToRow]
+            };
+            twgl.setUniforms(this.programInfo, uniforms);
+
+            let uLocationPixel2TexelMap = this.context.getUniformLocation(this.programInfo.program, "u_pixel2TexelMap");
+            this.context.uniform1i(uLocationPixel2TexelMap, TEXTURE_UNIT_SEQ_PIXEL_MAP);
+            this.context.activeTexture(this.context.TEXTURE0 + TEXTURE_UNIT_SEQ_PIXEL_MAP);
+            this.context.bindTexture(this.context.TEXTURE_2D, this.pixelMapTexture.texture);
+
+            let uLocationTexture = this.context.getUniformLocation(this.programInfo.program, "u_dataTexture");
+            this.context.uniform1i(uLocationTexture, TEXTURE_UNIT_SEQ_DATA);
+            this.context.activeTexture(this.context.TEXTURE0 + TEXTURE_UNIT_SEQ_DATA);
+            this.context.bindTexture(this.context.TEXTURE_2D, this.dataTexture.texture);
+
+            let uLocationCacheTexture = this.context.getUniformLocation(this.programInfo.program, "u_cache_fb");
+            this.context.uniform1i(uLocationCacheTexture, pPairOfCacheFB.prevCacheFB.textureUnitSeq);
+            this.context.activeTexture(this.context.TEXTURE0 + pPairOfCacheFB.prevCacheFB.textureUnitSeq);
+            this.context.bindTexture(this.context.TEXTURE_2D, pPairOfCacheFB.prevCacheFB.fbi.attachments[0]);
+        }
+
+        draw(
+            pBufferInfo,
+            pZoom,
+            pPairOfCacheFB,     //PairOfCacheFrameBufferClass
+            pInvalidTexelArea   //Rectangle
+        ) {
+            // A zoom.texel2PixelCol() LOGIKAI pixel koordinátát ad vissza!
+            let invalidPixelAreaFromCol = pZoom.texel2PixelCol( pInvalidTexelArea.getA().getX() );
+            let invalidPixelAreaFromRow = pZoom.texel2PixelRow( pInvalidTexelArea.getA().getY() );
+            let invalidPixelAreaToCol   = pZoom.texel2PixelCol( pInvalidTexelArea.getB().getX() );
+            let invalidPixelAreaToRow   = pZoom.texel2PixelRow( pInvalidTexelArea.getB().getY() );
+            if ( !pPairOfCacheFB.prevCacheFB.isValid() ) {
+                // Invalid a cache, ha zoom-változás, azaz átméretezés volt --> mindent újra kell számolni
+                invalidPixelAreaFromCol = 0;
+                invalidPixelAreaFromRow = 0;
+                invalidPixelAreaToCol   = MAX_DATA_ARRAY_TEXEL_WIDTH;
+                invalidPixelAreaToRow   = MAX_DATA_ARRAY_TEXEL_HEIGHT;
+            }
+
+            let cacheShaderOffset = pPairOfCacheFB.prevCacheFB.getOffsetShaderPixelVector();
+            let cacheDeltaPixelOffsetCol = pZoom.getShaderPixelOffsetCol() - cacheShaderOffset.getX();
+            let cacheDeltaPixelOffsetRow = pZoom.getShaderPixelOffsetRow() - cacheShaderOffset.getY();
+
+            this._setUniforms(
+                pBufferInfo,
+                pZoom,
+                pPairOfCacheFB,
+                cacheDeltaPixelOffsetCol,   cacheDeltaPixelOffsetRow,
+                invalidPixelAreaFromCol,    invalidPixelAreaFromRow,
+                invalidPixelAreaToCol,      invalidPixelAreaToRow
+            );
+//            log("draw(): ShdrOffs=("+pZoom.getShaderPixelOffsetCol()+","+pZoom.getShaderPixelOffsetRow()+")"
+//                +" PREV: "+pPairOfCacheFB.prevCacheFB.textureUnitSeq
+//                +" valid="+pPairOfCacheFB.prevCacheFB.isValid()
+//                +" offs="+pPairOfCacheFB.prevCacheFB.getOffsetShaderPixelVector().toString()
+//                +" INV=" +pInvalidTexelArea +" px=("+invalidPixelAreaFromCol+","+invalidPixelAreaFromRow +")-("+invalidPixelAreaToCol+","+invalidPixelAreaToRow+")"
+//            );
+            twgl.bindFramebufferInfo(this.context, pPairOfCacheFB.currCacheFB.fbi);
+            twgl.drawBufferInfo(this.context, pBufferInfo);
+            twgl.bindFramebufferInfo(this.context, null);
+        }
+    }
+
+    class ShaderProgramCacheClass {
+        constructor(
+            pWebGlContext,
+            pSrcVertex,
+            pSrcFragment
+        ) {
+            this.context = pWebGlContext;
+            this.programInfo = twgl.createProgramInfo(this.context, [pSrcVertex, pSrcFragment]);
+            log("shaderProgramCache created.");
+        }
+
+        _setUniforms(
+            pBufferInfo,
+            pCacheFB,           //CacheFrameBufferClass
+            pFilterType
+        ) {
+            this.context.useProgram(this.programInfo.program);
+            twgl.setBuffersAndAttributes(this.context, this.programInfo, pBufferInfo);
+
+            let uniforms = {
+                u_filter_type: pFilterType
+            };
+            twgl.setUniforms(this.programInfo, uniforms);
+
+            let uLocationTexture = this.context.getUniformLocation(this.programInfo.program, "u_cache_fb");
+            this.context.uniform1i(uLocationTexture, pCacheFB.textureUnitSeq);
+            this.context.activeTexture(this.context.TEXTURE0 + pCacheFB.textureUnitSeq);
+            this.context.bindTexture(this.context.TEXTURE_2D, pCacheFB.fbi.attachments[0]);
+        }
+
+        draw(
+            pBufferInfo,
+            pCacheFB,           //CacheFrameBufferClass
+            pFilterType
+        ) {
+            twgl.bindFramebufferInfo(this.context, null);
+            this._setUniforms(pBufferInfo, pCacheFB, pFilterType);
+            twgl.drawBufferInfo(this.context, pBufferInfo);
+        }
+    }
+
+    class CacheFrameBufferClass {
+        constructor(
+            pWebGlContext,
+            pTextureUnitSeq
+        ) {
+            this.context = pWebGlContext;
+            this.textureUnitSeq = pTextureUnitSeq;
+            this.valid = false;
+            this.offsetShaderPixelVector = new Vector2(-1* MAX_CANVAS_WIDTH, -1* MAX_CANVAS_WIDTH);
+
+            this.context.activeTexture(this.context.TEXTURE0 + this.textureUnitSeq);
+/*
+            let attachments = [
+                { format: this.context.RGBA, type: this.context.UNSIGNED_BYTE, min: this.context.LINEAR, wrap: this.context.CLAMP_TO_EDGE },
+                { format: this.context.DEPTH_STENCIL, },
+            ];
+*/
+
+            this.fbi = twgl.createFramebufferInfo(this.context);
+//            this.fbi = twgl.createFramebufferInfo(this.context, attachments);
+            twgl.resizeFramebufferInfo(this.context, this.fbi);
+
+            //-------
+            let message = "ok";
+            let value = true;
+
+            //status = this.context.checkFramebufferStatus(this.context.FRAMEBUFFER);       Ezt nem értem! "let" nélkül is "működik"(!) (elfelejtettem kirakni, megérteném a hibát), de a this.context.FRAMEBUFFER_COMPLETE esetben is "default" ágra fut?!?!?!?
+            let status = this.context.checkFramebufferStatus(this.context.FRAMEBUFFER);
+
+            switch (status) {
+                case this.context.FRAMEBUFFER_COMPLETE:
+                    value = true;
+                    break;
+                case this.context.FRAMEBUFFER_UNSUPPORTED:
+                    message = "Framebuffer is unsupported";
+                    value = false;
+                    break;
+                case this.context.FRAMEBUFFER_INCOMPLETE_ATTACHMENT:
+                    message = "Framebuffer incomplete attachment";
+                    value = false;
+                    break;
+                case this.context.FRAMEBUFFER_INCOMPLETE_DIMENSIONS:
+                    message = "Framebuffer incomplete (missmatched) dimensions";
+                    value = false;
+                    break;
+                case this.context.FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT:
+                    message = "Framebuffer incomplete missing attachment";
+                    value = false;
+                    break;
+                default:
+                    message = "Unexpected framebuffer status: " + status;
+                    value = false;
+            }
+            log("Frambuffer status="+status+" - "+message   +"   this.context.FRAMEBUFFER_COMPLETE="+this.context.FRAMEBUFFER_COMPLETE);
+            //-------
+
+            twgl.bindFramebufferInfo(this.context, null);
+            log("Cache framebuffer created.");
+        }
+
+        setInvalid() {
+            this.valid = false;
+        }
+        isValid() {
+            return this.valid;
+        }
+        setValidAndSaveOffsetPixel(
+            pNewOffsetShaderPixelCol,
+            pNewOffsetShaderPixelRow
+        ) {
+            this.valid = true;
+            this.offsetShaderPixelVector.setAll(pNewOffsetShaderPixelCol, pNewOffsetShaderPixelRow);
+        }
+        getOffsetShaderPixelVector() {
+            return this.offsetShaderPixelVector;
+        }
+    }
+
+    class PairOfCacheFrameBufferClass {
+        constructor(
+            pCacheFB_1,         //new CacheFrameBufferClass
+            pCacheFB_2          //new CacheFrameBufferClass
+        ) {
+            this.currCacheFB = pCacheFB_1;
+            this.prevCacheFB = pCacheFB_2;
+        }
+
+        swapCacheFB() {
+            let tmp = this.currCacheFB;
+            this.currCacheFB = this.prevCacheFB;
+            this.prevCacheFB = tmp;
+        }
+
+        setInvalid() {
+            this.currCacheFB.setInvalid();
+            this.prevCacheFB.setInvalid();
+        }
+    }
+
+    class DiagramClass {
+        constructor (
+            pWebGlContext,
+            pSrcVertex,
+            pSrcFragment,
+            pSrcFragmentCache
+        ) {
+            this.context = pWebGlContext;
+            let gl = this.context;
+
+            this.filterType = FILTER_TYPE_MAX;
+
+            // A megváltozott adatokat tartalmazó terület,
+            //      amelyet a következő rajzoláskor mindenképpen újra kell számolni,
+            //      nem szabad a "previous cache framebuffer"-ből vennünk.
+            this.invalidTexelArea = new Rectangle(new Vector2(null,null), new Vector2(null,null));
+
+            let arrays = {
+                position: [-1, -1, 0, 1, -1, 0, -1, 1, 0, -1, 1, 0, 1, -1, 0, 1, 1, 0],
+            };
+            this.bufferInfo = twgl.createBufferInfoFromArrays(gl, arrays);
+
+            twgl.resizeCanvasToDisplaySize(gl.canvas);
+            gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
+            this.zoom = new ZoomClass(gl.canvas.width, gl.canvas.height, dataArrayTexelWidth, gl.canvas.height);
+
+            this.dataText = new DataTextureClass(gl);            // Az adatokat tartalmazó textura-kezelő objektumunk
+            this.pixelMapText = new PixelMapTextureClass(gl);    // az adattextura<-->pixel megfeleltetési táblázat textura-kezelő objektumunk
+            let cacheFB_1 = new CacheFrameBufferClass(gl, TEXTURE_UNIT_SEQ_CACHE_FB_1);
+            let cacheFB_2 = new CacheFrameBufferClass(gl, TEXTURE_UNIT_SEQ_CACHE_FB_2);
+            this.pairOfCacheFB = new PairOfCacheFrameBufferClass(cacheFB_1, cacheFB_2);
+            this.shaderProgramMain = new ShaderProgramMainClass(gl, pSrcVertex, pSrcFragment, this.dataText, this.pixelMapText);
+            this.shaderProgramCache = new ShaderProgramCacheClass(gl, pSrcVertex, pSrcFragmentCache);
+
+            this._sendTexturePixel2TexelMap();
+        }
+
+        _sendTexturePixel2TexelMap() {
+            this.pixelMapText.writePixel2TexelMap(
+                this.zoom.colPixel2TexelMap,
+                this.zoom.rowPixel2TexelMap
+            );
+        }
+
+        draw() {
+            this.pairOfCacheFB.swapCacheFB();
+            this.shaderProgramMain.draw(this.bufferInfo, this.zoom, this.pairOfCacheFB, this.invalidTexelArea);
+            this.pairOfCacheFB.currCacheFB.setValidAndSaveOffsetPixel(this.zoom.getShaderPixelOffsetCol(), this.zoom.getShaderPixelOffsetRow());
+            this.invalidTexelArea.setAll(null,null, null,null);
+            this.shaderProgramCache.draw(this.bufferInfo, this.pairOfCacheFB.currCacheFB, this.filterType);
+        }
+
+        setPageTexelSize(pViewportTexelWidth, pViewportTexelHeight) {
+            this.pairOfCacheFB.setInvalid();
+            this.zoom.setPageTexelSize(pViewportTexelWidth, pViewportTexelHeight);
+            this._sendTexturePixel2TexelMap();
+        }
+
+        changePageTexelSize(pDeltaViewportWidth, pDeltaViewportHeight) {
+            this.pairOfCacheFB.setInvalid();
+            this.zoom.changePageTexelSize(pDeltaViewportWidth, pDeltaViewportHeight);
+            this._sendTexturePixel2TexelMap();
+        }
+
+        moveViewportToTexel(pTexelCol, pTexelRow) {
+            this.zoom.moveViewportToTexel(pTexelCol, pTexelRow);
+        }
+
+        moveViewportRelativeByPixel(pDeltaPixelCol, pDeltaPixelRow) {
+            this.zoom.moveViewportRelativeByPixel(pDeltaPixelCol, pDeltaPixelRow);
+        }
+
+        writeData(pStartLogicalCol, pStartLogicalRow, pDataVector1D) {
+            // Az eddig érvénytelennek, azaz újraszámolandónak tekintett területet
+            //      mennyire kell kiterjesztenünk a most megváltozó adatterületre való tekintettel?
+            //      Mi az a befoglaló téglalap,
+            //      ami az eddigi érvénytelen területet is,
+            //      és a most írásra kerülő területet is magába foglalja?
+            let writeFrom = new Vector2(
+                0,                      // Az egyszerűség kedvéért teljes sorokat érvénytelenítünk --> 0. oszloptól
+                pStartLogicalRow
+            );
+            let writeTo = new Vector2(
+                dataArrayTexelWidth,    // Az egyszerűség kedvéért teljes sorokat érvénytelenítünk --> MAX oszlopig
+                pStartLogicalRow + Math.floor(pDataVector1D.length / dataArrayTexelWidth)
+            );
+            let writeArea = new Rectangle(writeFrom, writeTo);
+            // Ok, most erre is terjesszük ki az érvénytelen adatokat jelölő területet:
+            //let debugOld = this.invalidTexelArea.toString();
+            this.invalidTexelArea.extendToBoundingBox(writeArea);
+            //log("writeData("+pStartLogicalCol+","+pStartLogicalRow+",["+pDataVector1D.length+"]): "+debugOld+" + "+writeArea.toString()+" --> "+this.invalidTexelArea.toString());
+            this.dataText.writeData(pStartLogicalCol, pStartLogicalRow, pDataVector1D);
+        }
+
+        setFilterType(pFilterType) {
+            switch (pFilterType) {
+                case "MIN":
+                    this.filterType = FILTER_TYPE_MIN;
+                    break;
+                case "MAX":
+                    this.filterType = FILTER_TYPE_MAX;
+                    break;
+                case "AVG":
+                    this.filterType = FILTER_TYPE_AVG;
+                    break;
+                case "DEBUG_NONE":
+                    this.filterType = FILTER_TYPE_DEBUG_NONE;
+                    break;
+                case "DEBUG_A":
+                    this.filterType = FILTER_TYPE_DEBUG_A;
+                    break;
+                case "DEBUG_B":
+                    this.filterType = FILTER_TYPE_DEBUG_B;
+                    break;
+                case "DEBUG_C":
+                    this.filterType = FILTER_TYPE_DEBUG_C;
+                    break;
+                default:
+                    this.filterType = FILTER_TYPE_MAX;
+            }
+        }
+    }
+
+    //-----------------------------------------------
+
+    class DataGeneratorSimple {
+        constructor() {
+            this.title = "Simple";
+        }
+
+        getValueXY(x, y) {
+            let result;
+            if (
+                // Negyedelő pontokban (0, 25, 50, 75, 100%) vízszintes és függőleges "vonal" magas érték formájában
+                (x % Math.floor(dataArrayTexelWidth / 4) == 0 || x == (dataArrayTexelWidth - 1))
+                || (y % Math.floor(dataArrayTexelHeight / 4) == 0 || y == (dataArrayTexelHeight - 1))
+            ) {
+                result = 32767;
+            } else if (
+                // Hetedelő pontokban (0, 25, 50, 75, 100%) vízszintes és függőleges "vonal" alacsony érték formájában
+                x % Math.floor(dataArrayTexelWidth / 7) == 0
+                || y % Math.floor(dataArrayTexelHeight / 7) == 0
+            ) {
+                result = 0;
+            } else if (x == y || x == (dataArrayTexelHeight - y)) {
+                result = 32767;
+            } else if (x >= 2 * (dataArrayTexelWidth / 20) && x < 3 * (dataArrayTexelWidth / 20) && y >= 2 * (dataArrayTexelHeight / 20) && y < 3 * (dataArrayTexelHeight / 20)) {
+                // Hogy legyen egy fekete téglalap, közel a bal felső sarkához, amiről felismerhetők az irányok.
+                result = 0;
+            } else if (y == 4205) {     // BUG? kb ettől kezdve a függőleges vonalak 3 pixel szélességűek lesznek?!?!?!?!?
+                result = 20000; // referencia vonal a hibakereséshez
+            } else {
+                // Egyébként függőleges írányba egyenletes színátmenet 5000-20000 RED
+                //result = Math.floor(y / dataArrayTexelHeight * 15000.0) + 5000;
+                result = Math.floor(y / dataArrayTexelHeight * 15000.0) + 5000 + Math.floor(x / dataArrayTexelWidth * 8000.0);
+            }
+            return result;
+        }
+    }
+
+    class DataGeneratorGrid {
+        constructor(pStepX, pStepY) {
+            this.stepX = pStepX;
+            this.stepY = pStepY;
+            this.title = "Grid "+this.stepX+"x"+this.stepY;
+        }
+
+        getValueXY(x, y) {
+            if (x % this.stepX == 0 || y % this.stepY == 0) {
+                return 20000;
+            } else {
+                return 5000;
+            }
+        }
+    }
+
+
+    let dataGeneratorList = [
+        new DataGeneratorSimple(),
+        new DataGeneratorGrid(2,2),
+        new DataGeneratorGrid(100,100)
+    ];
+
+    //-----------------------------------------------
+    class VerySimpleMouseListenerClass {
+        constructor(
+            pCanvasName
+        ) {
+            this.mouseCanvas = document.getElementById(pCanvasName);
+            this.mouseGenerateMoveEvent = true;
+            this.mouseGenerateZoomEvent = true;
+            this.mouseDrag = false;
+            this.mouseDownX = -1;
+            this.mouseDownY = -1;
+
+            this.mouseCanvas.onmousedown = this.mouseDown.bind(this);
+            this.mouseCanvas.onmouseup = this.mouseUp.bind(this);
+            this.mouseCanvas.onwheel = this.mouseWheel.bind(this);
+        }
+
+        mouseMove(e) {
+            if (this.mouseDrag && this.mouseGenerateMoveEvent) {
+                let x = e.pageX - this.mouseCanvas.offsetLeft;
+                let y = e.pageY - this.mouseCanvas.offsetTop;
+
+                this.mouseGenerateMoveEvent = false;
+                let event ={type: "Move", deltaCol: (x - this.mouseDownX) * -1, deltaRow: (y - this.mouseDownY)};
+                newEvent(event);
+
+                this.mouseDownX = x;
+                this.mouseDownY = y;
+            }
+        }
+
+        mouseDown(e) {
+            this.mouseDownX = e.pageX - this.mouseCanvas.offsetLeft;
+            this.mouseDownY = e.pageY - this.mouseCanvas.offsetTop;
+            this.mouseDrag = true;
+            this.mouseCanvas.onmousemove = this.mouseMove.bind(this);
+        }
+
+        mouseUp(e) {
+            this.mouseDrag = false;
+            this.mouseCanvas.onmousemove = null;
+        }
+
+        mouseWheel(e) {
+            if (this.mouseGenerateZoomEvent) {
+                let direction = (e.detail < 0 || e.wheelDelta > 0) ? 1 : -1;
+                let verDirection = direction;
+                let horDirection = direction;
+                if (e.ctrlKey && !e.shiftKey) {
+                    verDirection = 0;
+                } else if (!e.ctrlKey && e.shiftKey) {
+                    horDirection = 0;
+                } //else: egyik sincs lenyomva --> marad az alapértelmezett mindkétirányú zoom
+
+                this.mouseGenerateZoomEvent = false;
+                let event = {type: "Zoom", width: -1 * horDirection * zoomStep, height: -1 * verDirection * zoomStep};   //TODO: zoomStep....
+                newEvent(event);
+            }
+
+            e.preventDefault();
+            return false;
+        }
+
+        enableMoveEvent() {
+            this.mouseGenerateMoveEvent = true;
+        }
+        enableZoomEvent() {
+            this.mouseGenerateZoomEvent = true;
+        }
+    }
+
+    //-----------------------------------------------
+
+    function promiseGetHttpResponseText(pUrl) {
+        return new Promise( (resolve, reject) => {
+            //TODO: valami szebb és gyorsabb módszer?!
+            let xmlhttp = new XMLHttpRequest();
+            log("Loading: " + pUrl);
+            xmlhttp.open("GET", "./"+pUrl, false);
+            xmlhttp.send();
+            if ((xmlhttp.status === 200)) {
+                resolve(xmlhttp.responseText);
+            } else {
+                //TODO
+                log("Loading error: " + xmlhttp.status +" - "+ pUrl);
+                reject("HTTP error: " + xmlhttp.status);
+            }
+        });
+    }
+
+    log("Start...");
+    run();
+
+    async function run() {
+        log("...started");
+        let mouseListener = new VerySimpleMouseListenerClass("c");
+
+        //-------------------------------------------
+        let selDataGen = document.getElementById("selectDataGenerator");
+        selDataGen.remove(0);
+        for(let i = 0; i < dataGeneratorList.length; i++) {
+            let gen = dataGeneratorList[i];
+            let opt = document.createElement("option");
+            opt.innerHTML = gen.title;
+            opt.value = i;
+            selDataGen.appendChild(opt);
+            //log("selectDataGenerator option: "+i+". "+opt.innerHTML);
+        }
+
+        function getDataGenerator() {
+            let generatorCode  = document.getElementById("selectDataGenerator").value;
+            return dataGeneratorList[generatorCode];
+        }
+
+        let currentDataGenerator = getDataGenerator();
+
+        let measurementSimulation = true;
+        document.getElementById("cboxSimulation").checked = measurementSimulation;
+        function isMeasSimulation() {
+            return document.getElementById("cboxSimulation").checked;
+        }
+
+
+        //-------------------------------------------
+
+        let [srcVertex, srcFragment, srcFragmentCache] = await Promise.all([
+            promiseGetHttpResponseText("scripts/test_simple_vert.glsl"),
+            promiseGetHttpResponseText("scripts/test_simple_frag.glsl"),
+            promiseGetHttpResponseText("scripts/test_simple_cache_frag.glsl")
+        ]);
+        log("Shaders are loaded.");
+
+        let gl = document.getElementById("c").getContext("webgl2");
+
+        let diagram = new DiagramClass(gl, srcVertex, srcFragment, srcFragmentCache);
+        diagram.setFilterType("MAX");   // elegánsabb lenne kolvasni a "selectFilterType" elemből, de...
+        diagram.moveViewportToTexel(0, 0);
+
+        function fillTestData() {
+            // Tesztadatokat generálunk
+            log("fillTestData: start");
+            showLongInfo("Generating test data ...");
+            let dataArray = new Int16Array(dataArrayTexelWidth * dataArrayTexelHeight);
+            log("fillTestData: empty array");
+            for (let y = 0; y < dataArrayTexelHeight; y++) {
+                for (let x = 0; x < dataArrayTexelWidth; x++) {
+                    let pos = y * dataArrayTexelWidth + x;
+                    dataArray[pos] = currentDataGenerator.getValueXY(x, y);
+                }
+            }
+            log("fillTestData: JS array");
+            showLongInfo("Test data is generated.");
+
+            diagram.writeData(0, 0, dataArray);
+            log("fillTestDataSending: texSubImage2D");
+            showLongInfo("Test data is sent.")
+        }
+
+        function showShortInfo() {
+            document.querySelector('#info-short').innerHTML =
+                "dataTextureSize="+diagram.dataText.dataTextureWidth+"x"+diagram.dataText.dataTextureHight
+                +" dataArrayTexelSize="+dataArrayTexelWidth+"x"+dataArrayTexelHeight
+                +" pageTexelSize="+diagram.zoom.pageTexelWidth+"x"+diagram.zoom.pageTexelHeight
+                +" pagePixelSize="+diagram.zoom.pagePixelWidth+"x"+diagram.zoom.pagePixelHeight
+                +" pixelOffs=("+diagram.zoom.viewportAppPixelOffsetCol+"; "+diagram.zoom.viewportAppPixelOffsetRow+")"
+            ;
+        }
+
+        function showLongInfo(pMessage) {
+            document.querySelector('#info-long').innerHTML = pMessage;
+        }
+
+        function showPixel2TexelMap() {
+            let csvText = "";
+            for (let i=0; i<diagram.zoom.colPixel2TexelMap.length /2; i++) {
+                csvText = csvText
+                    +"\n"+ i +"."
+                    +"\t" + diagram.zoom.colPixel2TexelMap[i*2]
+                    +"\t" + diagram.zoom.colPixel2TexelMap[i*2 +1]
+                    +"\t" + diagram.zoom.rowPixel2TexelMap[i*2]
+                    +"\t" + diagram.zoom.rowPixel2TexelMap[i*2 +1]
+                ;
+            }
+            showLongInfo("Pixel2TexelMap:\n\nPixel\tCol: texel from\tCol: texel to\tRow: texel from\tRow: texel to" + csvText);
+        }
+
+        let dataLineCounter = -1;
+        let dataSubArray = new Int16Array(dataArrayTexelWidth /* 1 sor */);
+        //log("twgl.dataSubArray: created");
+
+        showShortInfo();
+        //function render(time) {
+        function render() {
+            stats.update();     // FPS Counter
+            let event = veryVerySimpleEventQueue.shift();
+            let doShowInfo = false;
+
+            if (event == null) {
+                // Ha nincs más teendőnk, a ráérő időnkben
+                //      szimuláljuk a mérési adatok érkezését:
+                if (measurementSimulation) {
+                    if (dataLineCounter >= dataArrayTexelHeight) {
+                        // Megtelt a tár... Stop.
+                        measurementSimulation = false;
+                    } else {
+                        dataLineCounter++;
+                        let y = dataLineCounter % dataArrayTexelHeight;
+                        for (let x = 0; x < dataArrayTexelWidth; x++) {
+                            dataSubArray[x] = currentDataGenerator.getValueXY(x, y);
+                        }
+                        diagram.writeData(0, y, dataSubArray);
+                        diagram.moveViewportToTexel(0, dataLineCounter);
+                    }
+                    doShowInfo = true;
+                }
+            } else if (event.type == "changeDataGenerator") {
+                currentDataGenerator = getDataGenerator();
+                measurementSimulation = true;
+                dataLineCounter = -1;
+                doShowInfo = true;
+            } else if (event.type == "ToggleSimulation") {
+                measurementSimulation = isMeasSimulation();
+            } else if (event.type == "ZoomFull") {
+                diagram.setPageTexelSize(dataArrayTexelWidth, dataArrayTexelHeight);
+                diagram.moveViewportToTexel(0, dataArrayTexelHeight);
+                doShowInfo = true;
+            } else if (event.type == "Zoom1x1") {   // 1 pixel = 1 texel
+                diagram.setPageTexelSize(diagram.zoom.pagePixelWidth, diagram.zoom.pagePixelHeight);
+                doShowInfo = true;
+            } else if (event.type == "Zoom") {
+                diagram.changePageTexelSize(event.width, event.height);
+                mouseListener.enableZoomEvent();
+                doShowInfo = true;
+            } else if (event.type == "Move") {
+                diagram.moveViewportRelativeByPixel(event.deltaCol, event.deltaRow);
+                mouseListener.enableMoveEvent();
+                doShowInfo = true;
+            } else if (event.type == "showPixel2TexelMap") {
+                showPixel2TexelMap();
+            } else if (event.type == "changeZoomDelta") {
+                zoomStep = parseInt(event.value);
+                doShowInfo = true;
+            } else if (event.type == "fillTestData") {
+                fillTestData();
+                measurementSimulation = false;
+                doShowInfo = true;
+                let event ={type: "ZoomFull"};
+                newEvent(event);
+            } else if (event.type == "changeFilterType") {
+                diagram.setFilterType(event.value);
+            }
+
+            //----------------------
+            // Rajzoltassuk ki újra és újra, (hiszen most a frag shader sebességére vagyunk kiváncsiak, nem a textura adatok mozgatására)...
+            diagram.draw();
+            requestAnimationFrame(render);
+            //----------------------
+
+            if (doShowInfo) {
+                showShortInfo();
+            }
+        }
+
+        log(" requestAnimationFrame: (1)");
+        requestAnimationFrame(render);
+        log(" requestAnimationFrame: (2)");
+    }
+</script>
+</html>
