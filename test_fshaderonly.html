@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf8">
+    <title>Detector TEST in WebGL (twgl)</title>
+    <script type="text/ecmascript" src="scripts/FShaderOnlyApp.js"></script>
+    <style>
+        body {
+            margin: 0;
+            font-family: monospace;
+        }
+
+        canvas {
+            position: absolute;
+            top: 30px;
+            left: 10px;
+            display: block;
+            width: 1000px;
+            height: 800px;
+        }
+
+        #b {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            width: 100%;
+            text-align: left;
+            z-index: 2;
+        }
+    </style>
+    <script src="//rawgit.com/mrdoob/stats.js/master/build/stats.min.js"></script>  <!--FPS Counter-->
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="b">FPS TEST: fragment shader version</div>
+<pre id="results"></pre>
+</body>
+<script src="scripts/thirdparty/SIMIColormap.js"></script>
+<script src="scripts/thirdparty/twgl.js"></script>
+<script>
+    "use strict";
+
+    //-----  FPS Counter -----------------------------------------
+    var stats=new Stats();
+    stats.dom.style='position:fixed !important; right:0px !important; top:0px !important; border:none !important; z-index:99999 !important;';
+    for(var child=stats.dom.firstChild;
+        child!==null;
+        child=child.nextSibling) {child.style = 'position:static !important;' + child.getAttribute('style');
+    }
+    document.body.insertBefore(stats.dom, document.body.firstChild);
+    //-----  FPS Counter -----------------------------------------
+
+    function promiseGetHttpResponseText(pUrl) {
+        return new Promise((resolve, reject) => {
+            //TODO: valami szebb és gyorsabb módszer?!
+            var xmlhttp = new XMLHttpRequest();
+            console.log("Loading: " + pUrl);
+            xmlhttp.open("GET", "./" + pUrl, false);
+            xmlhttp.send();
+            if ((xmlhttp.status === 200)) {
+                resolve(xmlhttp.responseText);
+            } else {
+                //TODO
+                console.log("Loading error: " + xmlhttp.status + " - " + pUrl);
+                reject("HTTP error: " + xmlhttp.status);
+            }
+        });
+    }
+
+    run();
+
+    async function run() {
+        let [vertexShader, fragmentShader] = await Promise.all([
+            promiseGetHttpResponseText("scripts/FShaderOnlyApp-vs.glsl"),
+            promiseGetHttpResponseText("scripts/FShaderOnlyApp-fs.glsl")
+        ]);
+        console.log("Shaders are loaded.");
+
+        var app = new FShaderOnlyApp(document.getElementById("c"), vertexShader, fragmentShader);
+        app.setDataSize(4000, 16000, app.demoDataGenerator);
+        app.setColoring(5000, "jet", 20000);
+
+        var dataSubArray = new Int16Array(app.pDataSizeX * 1 /* 1 sor */);
+        var currentRow = -1;
+        for (var x = 0; x < app.pDataSizeX; x++) {
+            dataSubArray[x] = 20000;
+        }
+        app.log("twgl.dataSubArray: created");
+
+        var render = function () {
+            /*
+             if (currentRow == -1) {
+             currentRow++;
+             } else {
+             let fillLevel = -32768 + (currentRow % 65536);
+             dataSubArray.fill(fillLevel);
+             for (var i = 0; i < 100; i++) {
+             app.processArrayBuffer(0, currentRow++, app.pDataSizeX, dataSubArray);
+             }
+             }
+             */
+            stats.update();     // FPS Counter
+            app.render();
+            window.requestAnimationFrame(render);
+
+        }
+
+        window.requestAnimationFrame(render);
+    }
+</script>
+</html>
+
+

@@ -110,8 +110,10 @@
 
     //-----------------------------------------------
     // Size of texture:
-    let dataArrayTexelWidth = 16000;
-    let dataArrayTexelHeight = 16000;
+//    let dataArrayTexelWidth = 16000;
+//    let dataArrayTexelHeight = 16000;
+    let dataArrayTexelWidth = 3200;    // FFM IF panorama legnagyobb felbontása
+    let dataArrayTexelHeight = 10/* 100ms-->10/sec */ * 60 * 60;   //--> 1 hour
     //-----------------------------------------------
     const MAX_CANVAS_WIDTH = 4096;
     const MAX_DATA_ARRAY_TEXEL_WIDTH    = 20000;    // az elméletileg támogatott legnagyobb adatmennyiség
