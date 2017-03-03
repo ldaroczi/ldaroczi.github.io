@@ -77,7 +77,7 @@
         console.log("Shaders are loaded.");
 
         var app = new MixedShaderApp(document.getElementById("c"), vertexShader, fragmentShader);
-        app.setDataSize(16000, 16000, app.demoDataGenerator);
+        app.setDataSize(8000, 16000, app.demoDataGenerator);
         app.setColoring(5000, "jet", 20000);
 
         var dataSubArray = new Int16Array(app.pDataSizeX * 1 /* 1 sor */);
